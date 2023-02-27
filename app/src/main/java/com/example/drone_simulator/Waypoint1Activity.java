@@ -2,34 +2,51 @@ package com.example.drone_simulator;
 
 import android.Manifest;
 import android.app.AlertDialog;
+import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.PackageManager;
+import android.graphics.Color;
 import android.os.Build;
+
+import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
 import androidx.fragment.app.FragmentActivity;
+
 import android.os.Bundle;
+import android.text.InputType;
 import android.util.Log;
 import android.view.View;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.RadioGroup;
 import android.widget.TextView;
 import android.widget.Toast;
 
 
+import com.example.drone_simulator.geofence.GeofenceHelper;
+import com.google.android.gms.location.Geofence;
+import com.google.android.gms.location.GeofencingClient;
+import com.google.android.gms.location.GeofencingRequest;
+import com.google.android.gms.location.LocationServices;
 import com.google.android.gms.maps.CameraUpdate;
 import com.google.android.gms.maps.CameraUpdateFactory;
 import com.google.android.gms.maps.GoogleMap;
 import com.google.android.gms.maps.OnMapReadyCallback;
 import com.google.android.gms.maps.SupportMapFragment;
 import com.google.android.gms.maps.model.BitmapDescriptorFactory;
+import com.google.android.gms.maps.model.CircleOptions;
 import com.google.android.gms.maps.model.LatLng;
 import com.google.android.gms.maps.model.Marker;
 import com.google.android.gms.maps.model.MarkerOptions;
+import com.google.android.gms.tasks.OnFailureListener;
+import com.google.android.gms.tasks.OnSuccessListener;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -56,13 +73,13 @@ import dji.sdk.products.Aircraft;
 import dji.sdk.sdkmanager.DJISDKManager;
 import dji.sdk.useraccount.UserAccountManager;
 
-public class Waypoint1Activity extends FragmentActivity implements View.OnClickListener, GoogleMap.OnMapClickListener, OnMapReadyCallback {
+public class Waypoint1Activity extends FragmentActivity implements View.OnClickListener, GoogleMap.OnMapClickListener,GoogleMap.OnMapLongClickListener, OnMapReadyCallback {
 
     protected static final String TAG = "GSDemoActivity";
 
     private GoogleMap gMap;
 
-    private Button locate, add, clear;
+    private Button locate, add, clear,geoFence;
     private Button config, upload, start, stop;
 
     private boolean isAdd = false;
@@ -82,19 +99,28 @@ public class Waypoint1Activity extends FragmentActivity implements View.OnClickL
     private WaypointMissionFinishedAction mFinishedAction = WaypointMissionFinishedAction.NO_ACTION;
     private WaypointMissionHeadingMode mHeadingMode = WaypointMissionHeadingMode.AUTO;
 
+    private GeofencingClient geofencingClient;
+    private GeofenceHelper geofenceHelper;
+
+    private float GEOFENCE_RADIUS = 200;
+    private String GEOFENCE_ID = "SOME_GEOFENCE_ID";
+
+    private int FINE_LOCATION_ACCESS_REQUEST_CODE = 10001;
+    private int BACKGROUND_LOCATION_ACCESS_REQUEST_CODE = 10002;
+
     @Override
-    protected void onResume(){
+    protected void onResume() {
         super.onResume();
         initFlightController();
     }
 
     @Override
-    protected void onPause(){
+    protected void onPause() {
         super.onPause();
     }
 
     @Override
-    protected void onDestroy(){
+    protected void onDestroy() {
         unregisterReceiver(mReceiver);
         removeListener();
         super.onDestroy();
@@ -103,12 +129,12 @@ public class Waypoint1Activity extends FragmentActivity implements View.OnClickL
     /**
      * @Description : RETURN Button RESPONSE FUNCTION
      */
-    public void onReturn(View view){
+    public void onReturn(View view) {
         Log.d(TAG, "onReturn");
         this.finish();
     }
 
-    private void setResultToToast(final String string){
+    private void setResultToToast(final String string) {
         Waypoint1Activity.this.runOnUiThread(new Runnable() {
             @Override
             public void run() {
@@ -126,6 +152,7 @@ public class Waypoint1Activity extends FragmentActivity implements View.OnClickL
         upload = (Button) findViewById(R.id.upload);
         start = (Button) findViewById(R.id.start);
         stop = (Button) findViewById(R.id.stop);
+        geoFence = (Button) findViewById(R.id.geo_fencing);
 
         locate.setOnClickListener(this);
         add.setOnClickListener(this);
@@ -134,6 +161,7 @@ public class Waypoint1Activity extends FragmentActivity implements View.OnClickL
         upload.setOnClickListener(this);
         start.setOnClickListener(this);
         stop.setOnClickListener(this);
+        geoFence.setOnClickListener(this);
 
     }
 
@@ -169,6 +197,10 @@ public class Waypoint1Activity extends FragmentActivity implements View.OnClickL
                 .findFragmentById(R.id.map);
         mapFragment.getMapAsync(this);
 
+        //geofencing
+        geofencingClient = LocationServices.getGeofencingClient(this);
+        geofenceHelper = new GeofenceHelper(this);
+
         addListener();
 
     }
@@ -181,13 +213,12 @@ public class Waypoint1Activity extends FragmentActivity implements View.OnClickL
         }
     };
 
-    private void onProductConnectionChange()
-    {
+    private void onProductConnectionChange() {
         initFlightController();
         loginAccount();
     }
 
-    private void loginAccount(){
+    private void loginAccount() {
 
         UserAccountManager.getInstance().logIntoDJIUserAccount(this,
                 new CommonCallbacks.CompletionCallbackWith<UserAccountState>() {
@@ -195,6 +226,7 @@ public class Waypoint1Activity extends FragmentActivity implements View.OnClickL
                     public void onSuccess(final UserAccountState userAccountState) {
                         Log.e(TAG, "Login Success");
                     }
+
                     @Override
                     public void onFailure(DJIError error) {
                         setResultToToast("Login Error:"
@@ -227,7 +259,7 @@ public class Waypoint1Activity extends FragmentActivity implements View.OnClickL
 
     //Add Listener for WaypointMissionOperator
     private void addListener() {
-        if (getWaypointMissionOperator() != null){
+        if (getWaypointMissionOperator() != null) {
             getWaypointMissionOperator().addListener(eventNotificationListener);
         }
     }
@@ -267,7 +299,7 @@ public class Waypoint1Activity extends FragmentActivity implements View.OnClickL
 
     public WaypointMissionOperator getWaypointMissionOperator() {
         if (instance == null) {
-            if (DJISDKManager.getInstance().getMissionControl() != null){
+            if (DJISDKManager.getInstance().getMissionControl() != null) {
                 instance = DJISDKManager.getInstance().getMissionControl().getWaypointMissionOperator();
             }
         }
@@ -281,20 +313,48 @@ public class Waypoint1Activity extends FragmentActivity implements View.OnClickL
 
     @Override
     public void onMapClick(LatLng point) {
-        if (isAdd == true){
-            markWaypoint(point);
-            Waypoint mWaypoint = new Waypoint(point.latitude, point.longitude, altitude);
-            //Add Waypoints to Waypoint arraylist;
-            if (waypointMissionBuilder != null) {
-                waypointList.add(mWaypoint);
-                waypointMissionBuilder.waypointList(waypointList).waypointCount(waypointList.size());
-            }else
-            {
-                waypointMissionBuilder = new WaypointMission.Builder();
-                waypointList.add(mWaypoint);
-                waypointMissionBuilder.waypointList(waypointList).waypointCount(waypointList.size());
+        if (isAdd == true) {
+            double distance =getDistanceFromLatLonInMeters(droneLocationLat,droneLocationLng,point.latitude,point.longitude);
+            Log.d(TAG, "onMapClick: "+distance);
+            if(getDistanceFromLatLonInMeters(droneLocationLat,droneLocationLng,point.latitude,point.longitude)<GEOFENCE_RADIUS) {
+                markWaypoint(point);
+                Waypoint mWaypoint = new Waypoint(point.latitude, point.longitude, altitude);
+                //Add Waypoints to Waypoint arraylist;
+                if (waypointMissionBuilder != null) {
+                    waypointList.add(mWaypoint);
+                    waypointMissionBuilder.waypointList(waypointList).waypointCount(waypointList.size());
+                } else {
+                    waypointMissionBuilder = new WaypointMission.Builder();
+                    waypointList.add(mWaypoint);
+                    waypointMissionBuilder.waypointList(waypointList).waypointCount(waypointList.size());
+                }
             }
-        }else{
+            else{
+                AlertDialog.Builder builder = new AlertDialog.Builder(this);
+
+                builder.setMessage("You can't add waypoint outside the geofence.");
+
+                // Set Alert Title
+                builder.setTitle("Outside geofence");
+
+                // Set Cancelable false for when the user clicks on the outside the Dialog Box then it will remain show
+                builder.setCancelable(false);
+
+                // Set the positive button with yes name Lambda OnClickListener method is use of DialogInterface interface.
+
+                // Set the Negative button with No name Lambda OnClickListener method is use of DialogInterface interface.
+                builder.setNegativeButton("Ok", (DialogInterface.OnClickListener) (dialog, which) -> {
+                    // If user click no then dialog box is canceled.
+                    dialog.cancel();
+                });
+
+                // Create the Alert dialog
+                AlertDialog alertDialog = builder.create();
+                // Show the Alert Dialog box
+                alertDialog.show();
+            }
+        } else {
+
             setResultToToast("Cannot Add Waypoint");
         }
     }
@@ -304,7 +364,7 @@ public class Waypoint1Activity extends FragmentActivity implements View.OnClickL
     }
 
     // Update the drone location based on states from MCU.
-    private void updateDroneLocation(){
+    private void updateDroneLocation() {
 
         LatLng pos = new LatLng(droneLocationLat, droneLocationLng);
         //Create MarkerOptions object
@@ -326,7 +386,7 @@ public class Waypoint1Activity extends FragmentActivity implements View.OnClickL
         });
     }
 
-    private void markWaypoint(LatLng point){
+    private void markWaypoint(LatLng point) {
         //Create MarkerOptions object
         MarkerOptions markerOptions = new MarkerOptions();
         markerOptions.position(point);
@@ -338,16 +398,16 @@ public class Waypoint1Activity extends FragmentActivity implements View.OnClickL
     @Override
     public void onClick(View v) {
         switch (v.getId()) {
-            case R.id.locate:{
+            case R.id.locate: {
                 updateDroneLocation();
                 cameraUpdate(); // Locate the drone's place
                 break;
             }
-            case R.id.add:{
+            case R.id.add: {
                 enableDisableAdd();
                 break;
             }
-            case R.id.clear:{
+            case R.id.clear: {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
@@ -360,20 +420,25 @@ public class Waypoint1Activity extends FragmentActivity implements View.OnClickL
                 updateDroneLocation();
                 break;
             }
-            case R.id.config:{
+            case R.id.config: {
                 showSettingDialog();
                 break;
             }
-            case R.id.upload:{
+            case R.id.upload: {
                 uploadWayPointMission();
                 break;
             }
-            case R.id.start:{
+            case R.id.start: {
                 startWaypointMission();
                 break;
             }
-            case R.id.stop:{
+            case R.id.stop: {
                 stopWaypointMission();
+                break;
+            }
+            case R.id.geo_fencing: {
+                setupDialog();
+
                 break;
             }
             default:
@@ -381,7 +446,65 @@ public class Waypoint1Activity extends FragmentActivity implements View.OnClickL
         }
     }
 
-    private void cameraUpdate(){
+    private void setupDialog() {
+        AlertDialog.Builder alert = new AlertDialog.Builder(this);
+        final EditText radius = new EditText(this);
+        radius.setInputType(InputType.TYPE_CLASS_NUMBER);
+        alert.setTitle("Enter Geofence Radius");
+
+        alert.setView(radius);
+
+        alert.setPositiveButton("Ok", new DialogInterface.OnClickListener() {
+            public void onClick(DialogInterface dialog, int whichButton) {
+                //What ever you want to do with the value
+                Float radiusValue = Float.valueOf(radius.getText().toString());
+                GEOFENCE_RADIUS =radiusValue;
+                addGeofencing(radiusValue);
+            }
+        });
+
+        alert.setNegativeButton("Cancel", new DialogInterface.OnClickListener() {
+            public void onClick(DialogInterface dialog, int whichButton) {
+                // what ever you want to do with No option.
+            }
+        });
+
+        alert.show();
+    }
+
+
+    public static double getDistanceFromLatLonInMeters(double lat1, double lon1, double lat2, double lon2) {
+        double R = 6371e3; // Earth's radius in meters
+        double dLat = Math.toRadians(lat2 - lat1);
+        double dLon = Math.toRadians(lon2 - lon1);
+        double a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+        double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        return R * c; // Distance in meters
+    }
+
+    private void addGeofencing(Float radius) {
+        LatLng point = new LatLng(droneLocationLat,droneLocationLng);
+        Log.d("onMapLongClick", "onMapLongClick: "+point);
+        if (Build.VERSION.SDK_INT >= 29) {
+            //We need background permission
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                handleMapLongClick(point,radius);
+            } else {
+                if (ActivityCompat.shouldShowRequestPermissionRationale(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION)) {
+                    //We show a dialog and ask for permission
+                    ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.ACCESS_BACKGROUND_LOCATION}, BACKGROUND_LOCATION_ACCESS_REQUEST_CODE);
+                } else {
+                    ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.ACCESS_BACKGROUND_LOCATION}, BACKGROUND_LOCATION_ACCESS_REQUEST_CODE);
+                }
+            }
+
+        } else {
+            handleMapLongClick(point,radius);
+        }
+
+    }
+
+    private void cameraUpdate() {
         LatLng pos = new LatLng(droneLocationLat, droneLocationLng);
         float zoomlevel = (float) 18.0;
         CameraUpdate cu = CameraUpdateFactory.newLatLngZoom(pos, zoomlevel);
@@ -389,33 +512,33 @@ public class Waypoint1Activity extends FragmentActivity implements View.OnClickL
 
     }
 
-    private void enableDisableAdd(){
+    private void enableDisableAdd() {
         if (isAdd == false) {
             isAdd = true;
             add.setText("Exit");
-        }else{
+        } else {
             isAdd = false;
             add.setText("Add");
         }
     }
 
-    private void showSettingDialog(){
-        LinearLayout wayPointSettings = (LinearLayout)getLayoutInflater().inflate(R.layout.dialog_waypointsetting, null);
+    private void showSettingDialog() {
+        LinearLayout wayPointSettings = (LinearLayout) getLayoutInflater().inflate(R.layout.dialog_waypointsetting, null);
 
         final TextView wpAltitude_TV = (TextView) wayPointSettings.findViewById(R.id.altitude);
         RadioGroup speed_RG = (RadioGroup) wayPointSettings.findViewById(R.id.speed);
         RadioGroup actionAfterFinished_RG = (RadioGroup) wayPointSettings.findViewById(R.id.actionAfterFinished);
         RadioGroup heading_RG = (RadioGroup) wayPointSettings.findViewById(R.id.heading);
 
-        speed_RG.setOnCheckedChangeListener(new RadioGroup.OnCheckedChangeListener(){
+        speed_RG.setOnCheckedChangeListener(new RadioGroup.OnCheckedChangeListener() {
 
             @Override
             public void onCheckedChanged(RadioGroup group, int checkedId) {
-                if (checkedId == R.id.lowSpeed){
+                if (checkedId == R.id.lowSpeed) {
                     mSpeed = 3.0f;
-                } else if (checkedId == R.id.MidSpeed){
+                } else if (checkedId == R.id.MidSpeed) {
                     mSpeed = 5.0f;
-                } else if (checkedId == R.id.HighSpeed){
+                } else if (checkedId == R.id.HighSpeed) {
                     mSpeed = 10.0f;
                 }
             }
@@ -427,13 +550,13 @@ public class Waypoint1Activity extends FragmentActivity implements View.OnClickL
             @Override
             public void onCheckedChanged(RadioGroup group, int checkedId) {
                 Log.d(TAG, "Select finish action");
-                if (checkedId == R.id.finishNone){
+                if (checkedId == R.id.finishNone) {
                     mFinishedAction = WaypointMissionFinishedAction.NO_ACTION;
-                } else if (checkedId == R.id.finishGoHome){
+                } else if (checkedId == R.id.finishGoHome) {
                     mFinishedAction = WaypointMissionFinishedAction.GO_HOME;
-                } else if (checkedId == R.id.finishAutoLanding){
+                } else if (checkedId == R.id.finishAutoLanding) {
                     mFinishedAction = WaypointMissionFinishedAction.AUTO_LAND;
-                } else if (checkedId == R.id.finishToFirst){
+                } else if (checkedId == R.id.finishToFirst) {
                     mFinishedAction = WaypointMissionFinishedAction.GO_FIRST_WAYPOINT;
                 }
             }
@@ -460,15 +583,15 @@ public class Waypoint1Activity extends FragmentActivity implements View.OnClickL
         new AlertDialog.Builder(this)
                 .setTitle("")
                 .setView(wayPointSettings)
-                .setPositiveButton("Finish",new DialogInterface.OnClickListener(){
+                .setPositiveButton("Finish", new DialogInterface.OnClickListener() {
                     public void onClick(DialogInterface dialog, int id) {
 
                         String altitudeString = wpAltitude_TV.getText().toString();
                         altitude = Integer.parseInt(nulltoIntegerDefalt(altitudeString));
-                        Log.e(TAG,"altitude "+altitude);
-                        Log.e(TAG,"speed "+mSpeed);
-                        Log.e(TAG, "mFinishedAction "+mFinishedAction);
-                        Log.e(TAG, "mHeadingMode "+mHeadingMode);
+                        Log.e(TAG, "altitude " + altitude);
+                        Log.e(TAG, "speed " + mSpeed);
+                        Log.e(TAG, "mFinishedAction " + mFinishedAction);
+                        Log.e(TAG, "mHeadingMode " + mHeadingMode);
                         configWayPointMission();
                     }
 
@@ -483,23 +606,24 @@ public class Waypoint1Activity extends FragmentActivity implements View.OnClickL
                 .show();
     }
 
-    String nulltoIntegerDefalt(String value){
-        if(!isIntValue(value)) value="0";
+    String nulltoIntegerDefalt(String value) {
+        if (!isIntValue(value)) value = "0";
         return value;
     }
 
-    boolean isIntValue(String val)
-    {
+    boolean isIntValue(String val) {
         try {
-            val=val.replace(" ","");
+            val = val.replace(" ", "");
             Integer.parseInt(val);
-        } catch (Exception e) {return false;}
+        } catch (Exception e) {
+            return false;
+        }
         return true;
     }
 
-    private void configWayPointMission(){
+    private void configWayPointMission() {
 
-        if (waypointMissionBuilder == null){
+        if (waypointMissionBuilder == null) {
 
             waypointMissionBuilder = new WaypointMission.Builder().finishedAction(mFinishedAction)
                     .headingMode(mHeadingMode)
@@ -507,8 +631,7 @@ public class Waypoint1Activity extends FragmentActivity implements View.OnClickL
                     .maxFlightSpeed(mSpeed)
                     .flightPathMode(WaypointMissionFlightPathMode.NORMAL);
 
-        }else
-        {
+        } else {
             waypointMissionBuilder.finishedAction(mFinishedAction)
                     .headingMode(mHeadingMode)
                     .autoFlightSpeed(mSpeed)
@@ -517,9 +640,9 @@ public class Waypoint1Activity extends FragmentActivity implements View.OnClickL
 
         }
 
-        if (waypointMissionBuilder.getWaypointList().size() > 0){
+        if (waypointMissionBuilder.getWaypointList().size() > 0) {
 
-            for (int i=0; i< waypointMissionBuilder.getWaypointList().size(); i++){
+            for (int i = 0; i < waypointMissionBuilder.getWaypointList().size(); i++) {
                 waypointMissionBuilder.getWaypointList().get(i).altitude = altitude;
             }
 
@@ -534,7 +657,7 @@ public class Waypoint1Activity extends FragmentActivity implements View.OnClickL
         }
     }
 
-    private void uploadWayPointMission(){
+    private void uploadWayPointMission() {
 
         getWaypointMissionOperator().uploadMission(new CommonCallbacks.CompletionCallback() {
             @Override
@@ -550,7 +673,7 @@ public class Waypoint1Activity extends FragmentActivity implements View.OnClickL
 
     }
 
-    private void startWaypointMission(){
+    private void startWaypointMission() {
 
         getWaypointMissionOperator().startMission(new CommonCallbacks.CompletionCallback() {
             @Override
@@ -560,7 +683,7 @@ public class Waypoint1Activity extends FragmentActivity implements View.OnClickL
         });
     }
 
-    private void stopWaypointMission(){
+    private void stopWaypointMission() {
 
         getWaypointMissionOperator().stopMission(new CommonCallbacks.CompletionCallback() {
             @Override
@@ -570,6 +693,85 @@ public class Waypoint1Activity extends FragmentActivity implements View.OnClickL
         });
 
     }
+
+    @Override
+    public void onMapLongClick(LatLng latLng) {
+        int type= Build.VERSION.SDK_INT;
+        Log.d("onMapLongClick", "onMapLongClick: "+type);
+        if (Build.VERSION.SDK_INT >= 29) {
+            //We need background permission
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                handleMapLongClick(latLng,GEOFENCE_RADIUS);
+            } else {
+                if (ActivityCompat.shouldShowRequestPermissionRationale(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION)) {
+                    //We show a dialog and ask for permission
+                    ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.ACCESS_BACKGROUND_LOCATION}, BACKGROUND_LOCATION_ACCESS_REQUEST_CODE);
+                } else {
+                    ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.ACCESS_BACKGROUND_LOCATION}, BACKGROUND_LOCATION_ACCESS_REQUEST_CODE);
+                }
+            }
+
+        } else {
+            handleMapLongClick(latLng,GEOFENCE_RADIUS);
+        }
+
+    }
+
+    private void handleMapLongClick(LatLng latLng,Float radius) {
+        gMap.clear();
+        addMarker(latLng);
+        addCircle(latLng, radius);
+        addGeofence(latLng, radius);
+    }
+
+    private void addMarker(LatLng latLng) {
+        MarkerOptions markerOptions = new MarkerOptions().position(latLng);
+        gMap.addMarker(markerOptions);
+    }
+
+    private void addCircle(LatLng latLng, float radius) {
+        CircleOptions circleOptions = new CircleOptions();
+        circleOptions.center(latLng);
+        circleOptions.radius(radius);
+        circleOptions.strokeColor(Color.argb(255, 255, 0, 0));
+        circleOptions.fillColor(Color.argb(64, 255, 0, 0));
+        circleOptions.strokeWidth(4);
+        gMap.addCircle(circleOptions);
+    }
+
+    private void addGeofence(LatLng latLng, float radius) {
+
+        Geofence geofence = geofenceHelper.getGeofence(GEOFENCE_ID, latLng, radius, Geofence.GEOFENCE_TRANSITION_ENTER | Geofence.GEOFENCE_TRANSITION_DWELL | Geofence.GEOFENCE_TRANSITION_EXIT);
+        GeofencingRequest geofencingRequest = geofenceHelper.getGeofencingRequest(geofence);
+        PendingIntent pendingIntent = geofenceHelper.getPendingIntent();
+
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            // TODO: Consider calling
+            //    ActivityCompat#requestPermissions
+            // here to request the missing permissions, and then overriding
+            //   public void onRequestPermissionsResult(int requestCode, String[] permissions,
+            //                                          int[] grantResults)
+            // to handle the case where the user grants the permission. See the documentation
+            // for ActivityCompat#requestPermissions for more details.
+            return;
+        }
+        geofencingClient.addGeofences(geofencingRequest, pendingIntent)
+                .addOnSuccessListener(new OnSuccessListener<Void>() {
+                    @Override
+                    public void onSuccess(Void aVoid) {
+                        Log.d(TAG, "onSuccess: Geofence Added...");
+                    }
+                })
+                .addOnFailureListener(new OnFailureListener() {
+                    @Override
+                    public void onFailure(@NonNull Exception e) {
+                        String errorMessage = geofenceHelper.getErrorString(e);
+                        Log.d(TAG, "onFailure: " + errorMessage);
+                    }
+                });
+    }
+
+
 
     @Override
     public void onMapReady(GoogleMap googleMap) {
